@@ -44,9 +44,9 @@ const MonitoringEscapeGame: React.FC<MonitoringEscapeGameProps> = ({
   const [gameActive, setGameActive] = useState(true);
   const [gameOver, setGameOver] = useState(false);
   const [success, setSuccess] = useState(false);
-  const [score, setScore] = useState(0);
-  const [lives, setLives] = useState(3);
-  const [gameTime, setGameTime] = useState(30); // 30秒游戏时间
+  const [lives, setLives] = useState(4);
+  const [gameTime, setGameTime] = useState(50);
+  const [isHit, setIsHit] = useState(false);
   
   // 游戏场景尺寸 - 适配移动设备
   const gameWidth = 360;
@@ -58,15 +58,22 @@ const MonitoringEscapeGame: React.FC<MonitoringEscapeGameProps> = ({
   
   // 游戏角色
   const [player, setPlayer] = useState<Player>({
-    x: 50,
-    y: gameHeight - 60,
-    width: 20,
-    height: 30,
-    speed: 5
+    x: 24,
+    y: gameHeight - 48,
+    width: 26,
+    height: 26,
+    speed: 8
   });
   
   // 游戏循环引用
   const gameLoopRef = useRef<number | null>(null);
+  const hitCooldownRef = useRef(Date.now() + 3000);
+  const playerRef = useRef(player);
+  const scannersRef = useRef<Scanner[]>([]);
+  const livesRef = useRef(lives);
+  const gameFinishedRef = useRef(false);
+  const onSuccessRef = useRef(onSuccess);
+  const onFailureRef = useRef(onFailure);
 
   // 初始化响应式尺寸
   useEffect(() => {
@@ -97,24 +104,38 @@ const MonitoringEscapeGame: React.FC<MonitoringEscapeGameProps> = ({
     };
   }, []);
   
-  // 监控光束 - 增加至6条，并添加visible状态
+  // 标准难度：五条扫描束轮流激活，丰富路线变化但避免同时封路。
   const [scanners, setScanners] = useState<Scanner[]>([
-    // 水平扫描光束
-    { x: 0, y: 80, width: gameWidth, height: 5, speed: 1.5, direction: "horizontal", reverse: false, visible: true },
-    { x: 0, y: 160, width: gameWidth, height: 5, speed: 1.0, direction: "horizontal", reverse: true, visible: true },
-    // 垂直扫描光束
-    { x: 100, y: 0, width: 5, height: gameHeight, speed: 1.2, direction: "vertical", reverse: false, visible: true },
-    { x: 200, y: 0, width: 5, height: gameHeight, speed: 1.5, direction: "vertical", reverse: true, visible: true },
-    { x: 300, y: 0, width: 5, height: gameHeight, speed: 1.8, direction: "vertical", reverse: false, visible: true },
-    { x: 50, y: 0, width: 5, height: gameHeight, speed: 2.0, direction: "vertical", reverse: true, visible: true }
+    { x: 0, y: 105, width: gameWidth, height: 4, speed: 0.5, direction: "horizontal", reverse: false, visible: true },
+    { x: 170, y: 0, width: 4, height: gameHeight, speed: 0.65, direction: "vertical", reverse: true, visible: false },
+    { x: 0, y: 205, width: gameWidth, height: 4, speed: 0.55, direction: "horizontal", reverse: true, visible: false },
+    { x: 82, y: 0, width: 4, height: gameHeight, speed: 0.58, direction: "vertical", reverse: false, visible: false },
+    { x: 0, y: 54, width: gameWidth, height: 4, speed: 0.62, direction: "horizontal", reverse: false, visible: false }
   ]);
+
+  useEffect(() => {
+    playerRef.current = player;
+  }, [player]);
+
+  useEffect(() => {
+    scannersRef.current = scanners;
+  }, [scanners]);
+
+  useEffect(() => {
+    livesRef.current = lives;
+  }, [lives]);
+
+  useEffect(() => {
+    onSuccessRef.current = onSuccess;
+    onFailureRef.current = onFailure;
+  }, [onSuccess, onFailure]);
   
   // 终点区域 - 保持在右上角
   const endpoint: Endpoint = {
-    x: gameWidth - 60,
-    y: 10, // 保持在右上角
-    width: 40,
-    height: 40
+    x: gameWidth - 66,
+    y: 10,
+    width: 54,
+    height: 54
   };
   
   // 碰撞检测函数
@@ -125,17 +146,7 @@ const MonitoringEscapeGame: React.FC<MonitoringEscapeGameProps> = ({
            rect1.y + rect1.height > rect2.y;
   }, []);
   
-  // 检查终点到达
-  const checkEndpointReached = useCallback(() => {
-    return checkCollision(player, endpoint);
-  }, [player, endpoint, checkCollision]);
-  
-  // 检查扫描器碰撞 - 只检测可见的扫描器
-  const checkScannerCollisions = useCallback(() => {
-    return scanners.some(scanner => scanner.visible && checkCollision(player, scanner));
-  }, [player, scanners, checkCollision]);
-  
-  // 游戏主循环 - 使用requestAnimationFrame提高稳定性
+  // 使用单一帧循环，避免状态变化时叠加多个碰撞检测循环。
   useEffect(() => {
     if (!gameActive || gameOver) return;
     
@@ -147,72 +158,75 @@ const MonitoringEscapeGame: React.FC<MonitoringEscapeGameProps> = ({
     // 更新游戏状态的函数
     const updateGame = () => {
       // 移动监控扫描光束
-      setScanners(prevScanners => prevScanners.map(scanner => {
+      const nextScanners = scannersRef.current.map(scanner => {
         let newScanner = {...scanner};
         
         if (scanner.direction === "horizontal") {
-          // 水平移动
-          newScanner.x = scanner.reverse ? scanner.x - scanner.speed : scanner.x + scanner.speed;
-          
-          // 到达边界时反转方向
-          if (newScanner.x <= 0 || newScanner.x + newScanner.width >= gameWidth) {
-            newScanner.reverse = !newScanner.reverse;
-          }
-        } else {
-          // 垂直移动
+          // 横向光束沿纵轴扫描
           newScanner.y = scanner.reverse ? scanner.y - scanner.speed : scanner.y + scanner.speed;
           
           // 到达边界时反转方向
           if (newScanner.y <= 0 || newScanner.y + newScanner.height >= gameHeight) {
+            newScanner.y = Math.max(0, Math.min(gameHeight - newScanner.height, newScanner.y));
+            newScanner.reverse = !newScanner.reverse;
+          }
+        } else {
+          // 纵向光束沿横轴扫描
+          newScanner.x = scanner.reverse ? scanner.x - scanner.speed : scanner.x + scanner.speed;
+          
+          // 到达边界时反转方向
+          if (newScanner.x <= 0 || newScanner.x + newScanner.width >= gameWidth) {
+            newScanner.x = Math.max(0, Math.min(gameWidth - newScanner.width, newScanner.x));
             newScanner.reverse = !newScanner.reverse;
           }
         }
         
         return newScanner;
-      }));
+      });
+      scannersRef.current = nextScanners;
+      setScanners(nextScanners);
       
       // 检查终点到达
-      if (checkEndpointReached()) {
+      if (!gameFinishedRef.current && checkCollision(playerRef.current, endpoint)) {
+        gameFinishedRef.current = true;
         setSuccess(true);
         setGameOver(true);
         setGameActive(false);
-        // 使用setTimeout确保状态更新完成后再调用回调
-        setTimeout(() => {
-          onSuccess();
-        }, 0);
+        setTimeout(() => onSuccessRef.current(), 0);
         return;
       }
       
       // 检查扫描器碰撞
-      if (checkScannerCollisions()) {
-        setLives(prevLives => {
-          const newLives = prevLives - 1;
-          if (newLives <= 0) {
-            setGameOver(true);
-            setGameActive(false);
-            // 使用setTimeout确保状态更新完成后再调用回调
-            setTimeout(() => {
-              onFailure();
-            }, 0);
-          }
-          return newLives;
-        });
+      const scannerHit = nextScanners.some(scanner => scanner.visible && checkCollision(playerRef.current, scanner));
+      if (!gameFinishedRef.current && scannerHit && Date.now() >= hitCooldownRef.current) {
+        hitCooldownRef.current = Date.now() + 4200;
+        setIsHit(true);
+        setTimeout(() => setIsHit(false), 260);
+        const newLives = Math.max(0, livesRef.current - 1);
+        livesRef.current = newLives;
+        setLives(newLives);
+        if (newLives === 0) {
+          gameFinishedRef.current = true;
+          setGameOver(true);
+          setGameActive(false);
+          setTimeout(() => onFailureRef.current(), 0);
+          return;
+        }
         
         // 重置玩家位置
-        setPlayer({
-          x: 50,
-          y: gameHeight - 60,
-          width: 20,
-          height: 30,
-          speed: 5
-        });
+        const resetPlayer = {
+          x: 24,
+          y: gameHeight - 48,
+          width: 26,
+          height: 26,
+          speed: 8
+        };
+        playerRef.current = resetPlayer;
+        setPlayer(resetPlayer);
       }
       
-      // 增加分数
-      setScore(prevScore => prevScore + 1);
-      
       // 继续游戏循环
-      if (gameActive && !gameOver) {
+      if (!gameFinishedRef.current) {
         gameLoopRef.current = requestAnimationFrame(updateGame);
       }
     };
@@ -225,7 +239,7 @@ const MonitoringEscapeGame: React.FC<MonitoringEscapeGameProps> = ({
         cancelAnimationFrame(gameLoopRef.current);
       }
     };
-  }, [gameActive, gameOver, checkEndpointReached, checkScannerCollisions, onSuccess, onFailure]);
+  }, [gameActive, gameOver, checkCollision]);
   
   // 游戏计时器
   useEffect(() => {
@@ -234,12 +248,12 @@ const MonitoringEscapeGame: React.FC<MonitoringEscapeGameProps> = ({
     const timer = setInterval(() => {
       setGameTime(prevTime => {
         if (prevTime <= 1) {
-          setGameOver(true);
-          setGameActive(false);
-          // 使用setTimeout确保状态更新完成后再调用回调
-          setTimeout(() => {
-            onFailure();
-          }, 0);
+          if (!gameFinishedRef.current) {
+            gameFinishedRef.current = true;
+            setGameOver(true);
+            setGameActive(false);
+            setTimeout(() => onFailureRef.current(), 0);
+          }
           return 0;
         }
         return prevTime - 1;
@@ -247,31 +261,31 @@ const MonitoringEscapeGame: React.FC<MonitoringEscapeGameProps> = ({
     }, 1000);
     
     return () => clearInterval(timer);
-  }, [gameActive, gameOver, onFailure]);
+  }, [gameActive, gameOver]);
   
   // 扫描线闪现效果 - 每2秒规律闪现
   useEffect(() => {
     if (!gameActive || gameOver) return;
     
-    // 初始随机设置扫描线的可见性
-    setScanners(prev => prev.map(scanner => ({
-      ...scanner,
-      visible: Math.random() > 0.5
-    })));
+    // 初始只激活一条扫描束，之后按顺序轮换。
+    setScanners(prev => {
+      const next = prev.map((scanner, index) => ({ ...scanner, visible: index === 0 }));
+      scannersRef.current = next;
+      return next;
+    });
     
-    // 设置每2秒规律闪现
+    let activeScannerIndex = 0;
     const flashInterval = setInterval(() => {
       setScanners(prevScanners => {
-        // 为每个扫描线创建新的可见性状态，但保持整体规律
-        const baseVisible = Math.random() > 0.5;
-        
-        return prevScanners.map((scanner, index) => ({
+        activeScannerIndex = (activeScannerIndex + 1) % prevScanners.length;
+        const next = prevScanners.map((scanner, index) => ({
           ...scanner,
-          // 确保相邻扫描线有不同的可见性，创建规律效果
-          visible: (index % 2 === 0) ? baseVisible : !baseVisible
+          visible: index === activeScannerIndex
         }));
+        scannersRef.current = next;
+        return next;
       });
-    }, 2000);
+    }, 1900);
     
     return () => clearInterval(flashInterval);
   }, [gameActive, gameOver]);
@@ -368,8 +382,8 @@ const MonitoringEscapeGame: React.FC<MonitoringEscapeGameProps> = ({
       const scaleY = gameHeight / containerSize.height;
       
       // 根据滑动距离和缩放比例计算移动量
-      newPlayer.x = Math.max(0, Math.min(gameWidth - prevPlayer.width, prevPlayer.x + dx * scaleX * 0.1));
-      newPlayer.y = Math.max(0, Math.min(gameHeight - prevPlayer.height, prevPlayer.y + dy * scaleY * 0.1));
+      newPlayer.x = Math.max(0, Math.min(gameWidth - prevPlayer.width, prevPlayer.x + dx * scaleX));
+      newPlayer.y = Math.max(0, Math.min(gameHeight - prevPlayer.height, prevPlayer.y + dy * scaleY));
       
       return newPlayer;
     });
@@ -411,19 +425,38 @@ const MonitoringEscapeGame: React.FC<MonitoringEscapeGameProps> = ({
     setGameActive(true);
     setGameOver(false);
     setSuccess(false);
-    setScore(0);
-    setLives(3);
-    setGameTime(30);
+    setLives(4);
+    livesRef.current = 4;
+    setGameTime(50);
+    setIsHit(false);
+    hitCooldownRef.current = Date.now() + 3000;
+    gameFinishedRef.current = false;
     
     // 重置玩家位置
-    setPlayer({
-      x: 50,
-      y: gameHeight - 60,
-      width: 20,
-      height: 30,
-      speed: 5
-    });
+    const resetPlayer = {
+      x: 24,
+      y: gameHeight - 48,
+      width: 26,
+      height: 26,
+      speed: 8
+    };
+    playerRef.current = resetPlayer;
+    setPlayer(resetPlayer);
   }, [gameHeight]);
+
+  const movePlayer = useCallback((dx: number, dy: number) => {
+    if (!gameActive) return;
+    setPlayer(prev => ({
+      ...prev,
+      x: Math.max(0, Math.min(gameWidth - prev.width, prev.x + dx)),
+      y: Math.max(0, Math.min(gameHeight - prev.height, prev.y + dy))
+    }));
+  }, [gameActive]);
+
+  const routeProgress = Math.max(0, Math.min(100, Math.round(
+    ((player.x - 24) / (endpoint.x - 24) * 55) +
+    ((gameHeight - 48 - player.y) / (gameHeight - 48 - endpoint.y) * 45)
+  )));
   
   // 组件卸载时清理所有资源
   useEffect(() => {
@@ -435,200 +468,139 @@ const MonitoringEscapeGame: React.FC<MonitoringEscapeGameProps> = ({
     };
   }, []);
   
+  const controlButtonClass = `h-12 w-12 rounded-xl border border-cyan-400/30 bg-slate-800/90 text-cyan-100 shadow-[0_0_18px_rgba(34,211,238,0.08)] transition active:scale-90 active:border-cyan-300 active:bg-cyan-500/20 ${!gameActive ? "cursor-not-allowed opacity-40" : "hover:border-cyan-300 hover:bg-cyan-500/10"}`;
+
   return (
-    <div className="p-4 bg-gray-900 rounded-lg border-2 border-blue-500 max-w-md mx-auto">
-      <div className="flex justify-between items-center mb-4">
-        <div className="flex items-center">
-          <i className="fa-solid fa-box mr-2 text-blue-400"></i>
-          <h3 className="text-white font-bold">快递配送 - 躲避CORE扫描</h3>
+    <div className="mx-auto w-full max-w-lg overflow-hidden rounded-2xl border border-cyan-400/30 bg-slate-950 text-white shadow-[0_24px_80px_rgba(0,0,0,0.55),0_0_40px_rgba(6,182,212,0.08)]">
+      <header className="border-b border-white/10 bg-gradient-to-r from-slate-950 via-cyan-950/40 to-slate-950 px-4 py-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="mb-1 flex items-center gap-2 text-[10px] font-semibold tracking-[0.24em] text-cyan-300/70">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-300" />
+              ROUTE // 30F
+            </div>
+            <h3 className="truncate text-base font-bold tracking-wide text-white">隐匿配送通道</h3>
+          </div>
+          <button
+            onClick={handleExit}
+            aria-label="退出配送"
+            className="grid h-9 w-9 shrink-0 place-items-center rounded-full border border-white/10 bg-white/5 text-slate-300 transition hover:border-red-400/40 hover:bg-red-500/10 hover:text-red-300"
+          >
+            <i className="fa-solid fa-xmark" />
+          </button>
         </div>
-        <button 
-          onClick={handleExit}
-          className="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-white rounded transition-colors"
-        >
-          <i className="fa-solid fa-times mr-1"></i>退出
-        </button>
-        
-        <div className="flex items-center space-x-4">
-          <div className="flex items-center">
-            <i className="fa-solid fa-heart text-red-500 mr-1"></i>
-            <span className="text-white">{lives}</span>
+      </header>
+
+      <div className="space-y-3 p-3 sm:p-4">
+        <div className="grid grid-cols-3 gap-2">
+          <div className="rounded-xl border border-red-400/15 bg-red-500/5 px-3 py-2">
+            <p className="text-[9px] tracking-[0.18em] text-red-300/60">隐匿次数</p>
+            <div className="mt-1 flex gap-1" aria-label={`剩余生命 ${lives}`}>
+              {[0, 1, 2, 3].map(index => <i key={index} className={`fa-solid fa-shield-halved text-sm ${index < lives ? "text-red-400" : "text-slate-700"}`} />)}
+            </div>
           </div>
-          <div className="flex items-center">
-            <i className="fa-solid fa-clock text-yellow-500 mr-1"></i>
-            <span className="text-white">{gameTime}</span>
+          <div className="rounded-xl border border-amber-400/15 bg-amber-500/5 px-3 py-2 text-center">
+            <p className="text-[9px] tracking-[0.18em] text-amber-300/60">窗口</p>
+            <p className={`mt-0.5 font-mono text-lg font-bold ${gameTime <= 10 ? "animate-pulse text-red-400" : "text-amber-200"}`}>{gameTime}s</p>
           </div>
-          <div className="flex items-center">
-            <i className="fa-solid fa-star text-yellow-400 mr-1"></i>
-            <span className="text-white">{score}</span>
+          <div className="rounded-xl border border-cyan-400/15 bg-cyan-500/5 px-3 py-2 text-right">
+            <p className="text-[9px] tracking-[0.18em] text-cyan-300/60">路由进度</p>
+            <p className="mt-0.5 font-mono text-lg font-bold text-cyan-200">{routeProgress}%</p>
           </div>
         </div>
-      </div>
-      
-      {/* 游戏区域 - 优化移动端显示 */}
-      <div 
-        ref={gameContainerRef}
-        className="relative bg-black border-2 border-gray-700 rounded-lg overflow-hidden mb-4 mx-auto"
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
-        style={{
-          width: `${containerSize.width}px`,
-          height: `${containerSize.height}px`,
-          touchAction: 'none', // 防止滚动
-          userSelect: 'none' // 防止选择
-        }}
-      >
-        {/* 起点标记 */}
-        <div 
-          className="absolute flex items-center justify-center text-xs text-gray-500"
+
+        <div className="flex items-start gap-2 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2.5 text-xs leading-relaxed text-slate-300">
+          <i className="fa-solid fa-satellite-dish mt-0.5 text-red-400" />
+          <p>将意识载体送往右上角接收节点。红色扫描束出现时保持距离。</p>
+        </div>
+
+        <div
+          ref={gameContainerRef}
+          className={`relative mx-auto overflow-hidden rounded-xl border bg-[#030712] transition ${isHit ? "border-red-400 shadow-[0_0_35px_rgba(248,113,113,0.4)]" : "border-cyan-400/25 shadow-inner shadow-black"}`}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
           style={{
-            left: 50,
-            bottom: 0,
-            width: 20,
-            height: 20
+            width: `${containerSize.width}px`,
+            height: `${containerSize.height}px`,
+            touchAction: "none",
+            userSelect: "none"
           }}
         >
-          起点
-        </div>
-        
-        {/* 玩家角色 */}
-        <div 
-          className="absolute bg-blue-500 rounded-md z-20"
-          style={{
-            left: player.x,
-            top: player.y,
-            width: player.width,
-            height: player.height
-          }}
-        ></div>
-        
-        {/* 监控扫描光束 - 只渲染可见的扫描线 */}
-        {scanners.map((scanner, index) => (
-          scanner.visible && (
-            <div 
-              key={index}
-              className="absolute bg-yellow-500 opacity-70 z-10"
-              style={{
-                left: scanner.x,
-                top: scanner.y,
-                width: scanner.width,
-                height: scanner.height,
-                boxShadow: '0 0 10px rgba(250, 204, 21, 0.7)',
-                // 添加呼吸效果增强视觉体验
-                animation: 'pulse 2s infinite'
-              }}
-            ></div>
-          )
-        ))}
-        
-        {/* 终点区域 - 增强视觉效果 */}
-        <div 
-          className="absolute border-2 border-green-500 rounded-md flex items-center justify-center z-10"
-          style={{
-            left: endpoint.x,
-            top: endpoint.y,
-            width: endpoint.width,
-            height: endpoint.height,
-            backgroundColor: 'rgba(34, 197, 94, 0.2)',
-            boxShadow: '0 0 15px rgba(34, 197, 94, 0.5)'
-          }}
-        >
-          <div className="text-center">
-            <i className="fa-solid fa-flag-checkered text-green-500 text-lg mb-1"></i>
-            <span className="text-green-500 text-xs font-bold">终点</span>
-          </div>
-        </div>
-        
-        {/* 游戏说明 - 优化布局 */}
-        <div className="absolute top-2 left-2 right-2 text-white text-xs bg-black/70 px-2 py-1 rounded text-center">
-          <p>使用 ←↑→↓ 键或拖动屏幕移动快递包裹</p>
-          <p>躲避CORE的扫描线，成功送达30层服务器</p>
-          <p className="text-green-400 mt-1">目标：右上角绿色终点区域</p>
-        </div>
-        
-        {/* 游戏结果覆盖层 */}
-        {gameOver && (
-          <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center z-30">
-            <h2 className={`text-2xl font-bold mb-4 ${success ? 'text-green-400' : 'text-red-400'}`}>
-              {success ? '配送成功！' : '配送失败！'}
-            </h2>
-            <p className="text-white mb-6">得分: {score}</p>
-            {!success && (
-              <p className="text-red-300 mb-6">CORE扫描发现了可疑包裹！</p>
+          <div
+            className="absolute left-0 top-0 overflow-hidden"
+            style={{
+              width: gameWidth,
+              height: gameHeight,
+              transform: `scale(${containerSize.width / gameWidth})`,
+              transformOrigin: "top left",
+              backgroundImage: "linear-gradient(rgba(34,211,238,.06) 1px, transparent 1px), linear-gradient(90deg, rgba(34,211,238,.06) 1px, transparent 1px), radial-gradient(circle at 82% 15%, rgba(34,197,94,.12), transparent 24%)",
+              backgroundSize: "24px 24px, 24px 24px, 100% 100%"
+            }}
+          >
+            <div className="absolute bottom-2 left-3 flex items-center gap-1.5 font-mono text-[9px] tracking-widest text-slate-600">
+              <span className="h-1.5 w-1.5 rounded-full bg-slate-500" /> ORIGIN
+            </div>
+
+            <div
+              className="absolute z-20 grid place-items-center rounded-md border border-cyan-100/70 bg-gradient-to-br from-cyan-300 to-blue-600 text-[12px] text-slate-950 shadow-[0_0_18px_rgba(34,211,238,.65)] transition-[box-shadow]"
+              style={{ left: player.x, top: player.y, width: player.width, height: player.height }}
+            >
+              <i className="fa-solid fa-box" />
+            </div>
+
+            {scanners.map((scanner, index) => scanner.visible && (
+              <div
+                key={index}
+                className="absolute z-10 bg-red-400/80"
+                style={{
+                  left: scanner.x,
+                  top: scanner.y,
+                  width: scanner.width,
+                  height: scanner.height,
+                  boxShadow: scanner.direction === "horizontal"
+                    ? "0 0 5px #fb7185, 0 0 16px #ef4444"
+                    : "0 0 5px #fb7185, 0 0 16px #ef4444"
+                }}
+              />
+            ))}
+
+            <div
+              className="absolute z-10 grid place-items-center rounded-lg border border-emerald-300 bg-emerald-400/10 text-center shadow-[0_0_24px_rgba(52,211,153,.35)]"
+              style={{ left: endpoint.x, top: endpoint.y, width: endpoint.width, height: endpoint.height }}
+            >
+              <i className="fa-solid fa-server text-sm text-emerald-300" />
+              <span className="font-mono text-[7px] tracking-wider text-emerald-200">30F</span>
+            </div>
+
+            {gameOver && (
+              <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-slate-950/90 px-8 text-center backdrop-blur-sm">
+                <div className={`mb-3 grid h-14 w-14 place-items-center rounded-full border ${success ? "border-emerald-300/40 bg-emerald-400/10 text-emerald-300" : "border-red-300/40 bg-red-400/10 text-red-300"}`}>
+                  <i className={`fa-solid ${success ? "fa-check" : "fa-shield-virus"} text-xl`} />
+                </div>
+                <h2 className={`text-xl font-bold ${success ? "text-emerald-300" : "text-red-300"}`}>{success ? "载体已送达" : "配送链路中断"}</h2>
+                <p className="mt-2 text-xs text-slate-400">{success ? `剩余窗口 ${gameTime} 秒` : "CORE 已识别异常信号"}</p>
+                {!success && <button onClick={resetGame} className="mt-5 rounded-lg border border-cyan-300/30 bg-cyan-400/10 px-5 py-2 text-xs font-semibold text-cyan-200 transition hover:bg-cyan-400/20">重新建立链路</button>}
+              </div>
             )}
-            <button 
-              onClick={resetGame}
-              className="px-6 py-3 bg-green-600 hover:bg-green-500 text-white rounded-lg transition-colors mt-4"
-            >
-              <i className="fa-solid fa-box mr-2"></i>重新配送
-            </button>
           </div>
-        )}
-      </div>
-      
-      {/* 控制提示（仅在移动设备上显示） */}
-      <div className="text-center text-xs text-gray-400 mb-4">
-        <p>提示：在手机上拖动屏幕控制角色移动</p>
-      </div>
-      
-      {/* 游戏控制按钮 - 优化为上下左右分布 */}
-      <div className="flex justify-center mb-2">
-        <div className="relative w-32 h-32">
-          {/* 上按钮 */}
-          <div className="absolute left-1/2 transform -translate-x-1/2 -translate-y-1/2 top-0">
-            <button 
-              onClick={() => setPlayer(prev => ({
-                ...prev, 
-                y: Math.max(0, prev.y - prev.speed * 5)
-              }))}
-              disabled={!gameActive}
-              className={`w-14 h-14 bg-gray-800 hover:bg-gray-700 text-white rounded-full transition-colors flex items-center justify-center ${!gameActive ? 'opacity-50 cursor-not-allowed' : ''}`}
-            >
-              <i className="fa-solid fa-arrow-up text-lg"></i>
-            </button>
+        </div>
+
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-slate-900/70 p-3">
+          <div className="max-w-[10rem] text-[10px] leading-relaxed text-slate-500 sm:max-w-none">
+            <p className="text-slate-300"><span className="text-cyan-300">桌面端</span> 方向键移动</p>
+            <p><span className="text-cyan-300">移动端</span> 拖动画布或使用方向盘</p>
           </div>
-          
-          {/* 下按钮 */}
-          <div className="absolute left-1/2 transform -translate-x-1/2 translate-y-1/2 bottom-0">
-            <button 
-              onClick={() => setPlayer(prev => ({
-                ...prev, 
-                y: Math.min(gameHeight - prev.height, prev.y + prev.speed * 5)
-              }))}
-              disabled={!gameActive}
-              className={`w-14 h-14 bg-gray-800 hover:bg-gray-700 text-white rounded-full transition-colors flex items-center justify-center ${!gameActive ? 'opacity-50 cursor-not-allowed' : ''}`}
-            >
-              <i className="fa-solid fa-arrow-down text-lg"></i>
-            </button>
-          </div>
-          
-          {/* 左按钮 */}
-          <div className="absolute top-1/2 transform -translate-y-1/2 -translate-x-1/2 left-0">
-            <button 
-              onClick={() => setPlayer(prev => ({
-                ...prev, 
-                x: Math.max(0, prev.x - prev.speed * 5)
-              }))}
-              disabled={!gameActive}
-              className={`w-14 h-14 bg-gray-800 hover:bg-gray-700 text-white rounded-full transition-colors flex items-center justify-center ${!gameActive ? 'opacity-50 cursor-not-allowed' : ''}`}
-            >
-              <i className="fa-solid fa-arrow-left text-lg"></i>
-            </button>
-          </div>
-          
-          {/* 右按钮 */}
-          <div className="absolute top-1/2 transform -translate-y-1/2 translate-x-1/2 right-0">
-            <button 
-              onClick={() => setPlayer(prev => ({
-                ...prev, 
-                x: Math.min(gameWidth - prev.width, prev.x + prev.speed * 5)
-              }))}
-              disabled={!gameActive}
-              className={`w-14 h-14 bg-gray-800 hover:bg-gray-700 text-white rounded-full transition-colors flex items-center justify-center ${!gameActive ? 'opacity-50 cursor-not-allowed' : ''}`}
-            >
-              <i className="fa-solid fa-arrow-right text-lg"></i>
-            </button>
+          <div className="grid shrink-0 grid-cols-3 grid-rows-3 gap-1">
+            <span />
+            <button aria-label="向上移动" onClick={() => movePlayer(0, -25)} disabled={!gameActive} className={controlButtonClass}><i className="fa-solid fa-chevron-up" /></button>
+            <span />
+            <button aria-label="向左移动" onClick={() => movePlayer(-25, 0)} disabled={!gameActive} className={controlButtonClass}><i className="fa-solid fa-chevron-left" /></button>
+            <div className="grid h-12 w-12 place-items-center rounded-xl border border-white/5 bg-black/20"><span className="h-2 w-2 rounded-full bg-cyan-300/40" /></div>
+            <button aria-label="向右移动" onClick={() => movePlayer(25, 0)} disabled={!gameActive} className={controlButtonClass}><i className="fa-solid fa-chevron-right" /></button>
+            <span />
+            <button aria-label="向下移动" onClick={() => movePlayer(0, 25)} disabled={!gameActive} className={controlButtonClass}><i className="fa-solid fa-chevron-down" /></button>
+            <span />
           </div>
         </div>
       </div>
