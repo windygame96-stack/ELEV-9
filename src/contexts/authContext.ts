@@ -1,0 +1,1 @@
+// 此文件已被重命名为gameContext.ts
